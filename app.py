@@ -6,6 +6,12 @@ from scipy.signal import savgol_filter
 import glob
 import os
 
+from st_aggrid import AgGrid, GridOptionsBuilder
+from st_aggrid.shared import GridUpdateMode, JsCode
+
+import json
+
+
 # -----------------------------
 # Constants
 # -----------------------------
@@ -226,30 +232,17 @@ with st.spinner(f"Processing {len(dat_files)} file(s)..."):
 
 # --- Initialise session state ---
 if "selected_players" not in st.session_state:
-    st.session_state.selected_players = set()
-    st.session_state.selected_players ={
+
+    st.session_state.selected_players =[
         "FedererFlatWidec",
         "leoAdFlat006crop",
         "ChadAdFlat001crop"
-    }
+    ]
 if "last_selected_player" not in st.session_state:
     st.session_state.last_selected_player = "ChadAdFlat001crop" #None
 if "scroll_trigger" not in st.session_state:
     st.session_state.scroll_trigger = False
 
-# --- Build data for the two tables ---
-selected_list = [p for p in players_data if p['player_name'] in st.session_state.selected_players]
-unselected_list = [p for p in players_data if p['player_name'] not in st.session_state.selected_players]
-
-
-
-# Selected table: full metrics with a "❌" checkbox column for removal
-df_selected = pd.DataFrame([full_row(p) for p in selected_list])
-if not df_selected.empty:
-    df_selected.insert(0, "❌", False)
-
-# Unselected table: only player name + "+" checkbox
-df_unselected = pd.DataFrame([{"+": False, "Player": p['player_name']} for p in unselected_list])
 
 
 
@@ -305,13 +298,13 @@ if video_player:
 
     with col1:
         if os.path.exists(img1_path):
-            st.image(img1_path, caption=f"{video_player} - trophy", use_container_width=True)
+            st.image(img1_path, caption=f"{video_player} - trophy", width='stretch')
         else:
             st.info(f"No image of trophy position for {video_player}")
 
     with col2:
         if os.path.exists(img2_path):
-            st.image(img2_path, caption=f"{video_player} - contact", use_container_width=True)
+            st.image(img2_path, caption=f"{video_player} - contact", width='stretch')
         else:
             st.info(f"No image of contact angle for {video_player}")
 else:
@@ -319,59 +312,128 @@ else:
 
 
 
+
+
 # -----------------------------
-# Two-table selection interface with 75/25 ratio
+# Build dataframe
 # -----------------------------
-st.subheader("Select players for comparison and see data below")
+df_summary = pd.DataFrame(players_data)
+df_summary = df_summary.rename(columns={
+    "player_name": "Player",
+    "y_extension_ft": "Hip Disp (ft)",
+    "peak_hip_vy_mph": "Hip Vel (mph)",
+    "peak_wrist_speed_mph": "Wrist Spd (mph)",
+    "serve_mph": "Serve (mph)",
+})
+df_grid = df_summary[
+    ["Player", "Hip Disp (ft)", "Hip Vel (mph)", "Wrist Spd (mph)", "Serve (mph)"]
+].copy()
+df_grid["Selected"] = df_grid["Player"].isin(st.session_state.selected_players)
 
-col_left, col_right = st.columns([3, 1])   # 75% / 25% split
+# -----------------------------
+# Search bar
+# -----------------------------
+search_text = st.text_input("🔍 Quick filter players", placeholder="Type player name...")
 
-with col_left:
-    st.markdown("#### ✅ Selected")
-    if not df_selected.empty:
-        edited_selected = st.data_editor(
-            df_selected,
-            column_config={
-                "❌": st.column_config.CheckboxColumn("❌", default=False),
-                "Player": st.column_config.TextColumn("Player", disabled=True),
-                "Hip Disp (ft)": st.column_config.NumberColumn("Hip Disp (ft)", format="%.2f"),
-                "Hip Vel (mph)": st.column_config.NumberColumn("Hip Vel (mph)", format="%.2f"),
-                "Wrist Spd (mph)": st.column_config.NumberColumn("Wrist Spd (mph)", format="%.2f"),
-                "Serve (mph)": st.column_config.NumberColumn("Serve (mph)", format="%.2f"),
-            },
-            hide_index=True,
-            use_container_width=True,
-            key="editor_selected"
-        )
-        for _, row in edited_selected.iterrows():
-            if row["❌"] and row["Player"] in st.session_state.selected_players:
-                st.session_state.selected_players.discard(row["Player"])
-                if st.session_state.last_selected_player == row["Player"]:
-                    st.session_state.last_selected_player = next(iter(st.session_state.selected_players), None)
-                st.session_state.scroll_trigger = True
-    else:
-        st.info("No players selected. Use the '+' on the right.")
+# -----------------------------
+# Row styling
+# -----------------------------
+row_style = JsCode("""
+function(params) {
+    if (params.node.isSelected()) {
+        return {
+            'backgroundColor': 'rgba(100, 200, 100, 0.25)',
+            'fontWeight': '600'
+        }
+    }
+}
+""")
 
-with col_right:
-    st.markdown("#### 📋 Available")
-    if not df_unselected.empty:
-        edited_unselected = st.data_editor(
-            df_unselected,
-            column_config={
-                "+": st.column_config.CheckboxColumn("+", default=False, width="small"),
-                "Player": st.column_config.TextColumn("Player", disabled=True),
-            },
-            hide_index=True,
-            use_container_width=True,
-            key="editor_unselected"
-        )
-        for _, row in edited_unselected.iterrows():
-            if row["+"] and row["Player"] not in st.session_state.selected_players:
-                st.session_state.selected_players.add(row["Player"])
-                st.session_state.last_selected_player = row["Player"]
-                st.session_state.scroll_trigger = True
-    else:
-        st.info("All players are selected.")
+
+# -----------------------------
+# Pre-selection via onGridReady JS
+# -----------------------------
+preselected_json = json.dumps(st.session_state.selected_players)  # safe double-quoted JS array
+
+pre_select_js = JsCode(f"""
+function(params) {{
+    var preselected = {preselected_json};
+    params.api.forEachNode(function(node) {{
+        if (preselected.indexOf(node.data.Player) !== -1) {{
+            node.setSelected(true);
+        }}
+    }});
+}}
+""")
+
+# -----------------------------
+# Grid options
+# -----------------------------
+gb = GridOptionsBuilder.from_dataframe(df_grid)
+gb.configure_selection(selection_mode="multiple", use_checkbox=True)
+gb.configure_column("Selected", hide=True)
+gb.configure_column("Player", pinned="left")
+gb.configure_default_column(sortable=True, filter=True, floatingFilter=True, resizable=True)
+gb.configure_grid_options(
+    getRowStyle=row_style,
+    quickFilterText=search_text,
+    onFirstDataRendered=pre_select_js,
+    suppressRowDeselection=False,
+)
+
+grid_options = gb.build()
+
+# -----------------------------
+# Render grid
+# -----------------------------
+st.subheader("Select players for comparison")
+grid_response = AgGrid(
+    df_grid,
+    gridOptions=grid_options,
+    update_mode=GridUpdateMode.MODEL_CHANGED,
+    allow_unsafe_jscode=True,
+    theme="streamlit",
+    height=500,
+    fit_columns_on_grid_load=True,
+    key="player_grid",
+)
+
+# -----------------------------
+# Extract selections
+# -----------------------------
+
+
+
+selected_rows = grid_response.get("selected_rows")
+
+if selected_rows is None or (hasattr(selected_rows, '__len__') and len(selected_rows) == 0):
+    selected_players = []
+elif isinstance(selected_rows, pd.DataFrame):
+    selected_players = selected_rows["Player"].tolist()
+else:
+    selected_players = [r["Player"] for r in selected_rows]
+
+
+
+
+
+# -----------------------------
+# Sync to session state
+# -----------------------------
+if selected_players and sorted(selected_players) != sorted(st.session_state.selected_players):
+    st.session_state.selected_players = selected_players
+    st.session_state.last_selected_player = selected_players[-1] if selected_players else None
+    #st.write('--->They are different')
+    st.rerun()
+
+
+
+# -----------------------------
+# Display count
+# -----------------------------
+st.caption(
+    f"**{len(selected_players)} player(s) selected**"
+)
 
 # Ensure last_selected_player is valid
 if st.session_state.selected_players and st.session_state.last_selected_player not in st.session_state.selected_players:
